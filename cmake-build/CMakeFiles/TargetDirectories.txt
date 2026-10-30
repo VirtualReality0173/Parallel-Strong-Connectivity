@@ -1,0 +1,4 @@
+C:/Desktop/Parallel Computing Project/Parallel-Strong-Connectivity/cmake-build/CMakeFiles/parallel_scc.dir
+C:/Desktop/Parallel Computing Project/Parallel-Strong-Connectivity/cmake-build/CMakeFiles/test.dir
+C:/Desktop/Parallel Computing Project/Parallel-Strong-Connectivity/cmake-build/CMakeFiles/edit_cache.dir
+C:/Desktop/Parallel Computing Project/Parallel-Strong-Connectivity/cmake-build/CMakeFiles/rebuild_cache.dir
