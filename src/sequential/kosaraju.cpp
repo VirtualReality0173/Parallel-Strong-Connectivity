@@ -58,7 +58,7 @@ void kosaraju(int V,vector<vector<int>>&adj){
 
 }
 
-int main(){
+/*int main(){
     int V,E;
     cout << "Enter Number of Vertices and Edges: ";
     cin >>V >>E;
@@ -72,4 +72,4 @@ int main(){
     }
     kosaraju(V,adj);
     return 0;
-}
+}*/

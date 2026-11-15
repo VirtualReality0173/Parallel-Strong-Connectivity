@@ -1,4 +1,4 @@
-#include<iostream>
+/* #include<iostream>
 #include<vector>
 #include<stack>
 using namespace std;
@@ -74,4 +74,60 @@ int main(){
     tarjan.printSCC();
 
     return 0;
+}
+
+
+*/
+
+
+
+#include "scc/tarjan.hpp"
+#include <algorithm>
+
+TarjanSCC::TarjanSCC(const Graph& g)
+    : graph(g),
+      disc(g.V, -1),
+      low(g.V, 0),
+      onStack(g.V, false) {}
+
+void TarjanSCC::dfs(int u) {
+    disc[u] = low[u] = timer++;
+    st.push_back(u);
+    onStack[u] = true;
+
+    for (int v : graph.adj[u]) {
+        if (disc[v] == -1) {
+            dfs(v);
+            low[u] = std::min(low[u], low[v]);
+        }
+        else if (onStack[v]) {
+            low[u] = std::min(low[u], disc[v]);
+        }
+    }
+
+    if (low[u] == disc[u]) {
+        std::vector<int> component;
+
+        while (true) {
+            int v = st.back();
+            st.pop_back();
+            onStack[v] = false;
+
+            component.push_back(v);
+
+            if (v == u) break;
+        }
+
+        groups.push_back(component);
+    }
+}
+
+std::vector<std::vector<int>> TarjanSCC::run() {
+    for (int u = 0; u < graph.V; u++) {
+        if (disc[u] == -1) {
+            dfs(u);
+        }
+    }
+
+    return groups;
 }
