@@ -62,6 +62,25 @@ static Subproblem makeSubproblem(
     return Subproblem(childGraph, original);
 }
 
+static int choosePivot(const Graph& graph) {
+
+    int bestVertex = 0;
+    std::size_t bestDegree = 0;
+
+    for (int v = 0; v < graph.V; v++) {
+
+        std::size_t degree =
+            graph.adj[v].size() +
+            graph.rev_adj[v].size();
+
+        if (degree > bestDegree) {
+            bestDegree = degree;
+            bestVertex = v;
+        }
+    }
+
+    return bestVertex;
+}
 
 // Recursive pivot-based SCC decomposition.
 static std::vector<std::vector<int>> solveSubproblem(
@@ -103,7 +122,7 @@ static std::vector<std::vector<int>> solveSubproblem(
 }
 
     // Select the first local vertex as pivot.
-    int pivot = 0;
+    int pivot = choosePivot(problem.graph);
 
     PivotPartition partition =
         pivotSCC(problem.graph, pivot);
