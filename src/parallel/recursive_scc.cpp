@@ -1,7 +1,7 @@
 
 #include "scc/parallel_scc.hpp"
 #include "scc/pivot_scc.hpp"
-
+#include "scc/tarjan.hpp"
 #include <vector>
 
 #ifdef _OPENMP
@@ -81,6 +81,26 @@ static std::vector<std::vector<int>> solveSubproblem(
         result.push_back(problem.originalVertices);
         return result;
     }
+
+    // Sequential cutoff for small subproblems.
+    const int SEQUENTIAL_CUTOFF = 32;
+    if (n <= SEQUENTIAL_CUTOFF) {
+    TarjanSCC tarjan(problem.graph);
+    auto localComponents = tarjan.run();
+    // Convert local vertex IDs to original vertex IDs.
+    for (const auto& component : localComponents) {
+        std::vector<int> originalComponent;
+        for (int v : component) {
+            originalComponent.push_back(
+                problem.originalVertices[v]
+            );
+        }
+
+        result.push_back(originalComponent);
+    }
+
+    return result;
+}
 
     // Select the first local vertex as pivot.
     int pivot = 0;
