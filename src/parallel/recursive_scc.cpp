@@ -3,6 +3,7 @@
 #include "scc/pivot_scc.hpp"
 #include "scc/tarjan.hpp"
 #include <vector>
+#include <cstdlib>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -62,25 +63,32 @@ static Subproblem makeSubproblem(
     return Subproblem(childGraph, original);
 }
 
-static int choosePivot(const Graph& graph) {
 
+static int choosePivot(const Graph& graph) {
     int bestVertex = 0;
     std::size_t bestDegree = 0;
+    int bestDistance = graph.V;
+
+    int center = graph.V / 2;
 
     for (int v = 0; v < graph.V; v++) {
-
         std::size_t degree =
-            graph.adj[v].size() +
-            graph.rev_adj[v].size();
+            graph.adj[v].size() + graph.rev_adj[v].size();
 
-        if (degree > bestDegree) {
+        int distance = std::abs(v - center);
+
+        if (degree > bestDegree ||
+            (degree == bestDegree && distance < bestDistance)) {
+
             bestDegree = degree;
+            bestDistance = distance;
             bestVertex = v;
         }
     }
 
     return bestVertex;
 }
+
 
 // Recursive pivot-based SCC decomposition.
 static std::vector<std::vector<int>> solveSubproblem(
@@ -153,27 +161,37 @@ static std::vector<std::vector<int>> solveSubproblem(
     std::vector<std::vector<int>> backwardResult;
     std::vector<std::vector<int>> neitherResult;
 
-    // Execute the recursive subproblems concurrently.
-    #pragma omp taskgroup
-    {
+
+#pragma omp taskgroup
+{
+    if (forwardProblem.graph.V > TASK_CUTOFF) {
         #pragma omp task shared(forwardResult) firstprivate(forwardProblem)
         {
-            forwardResult =
-                solveSubproblem(forwardProblem);
+            forwardResult = solveSubproblem(forwardProblem);
         }
+    } else if (forwardProblem.graph.V > 0) {
+        forwardResult = solveSubproblem(forwardProblem);
+    }
 
+    if (backwardProblem.graph.V > TASK_CUTOFF) {
         #pragma omp task shared(backwardResult) firstprivate(backwardProblem)
         {
-            backwardResult =
-                solveSubproblem(backwardProblem);
+            backwardResult = solveSubproblem(backwardProblem);
         }
+    } else if (backwardProblem.graph.V > 0) {
+        backwardResult = solveSubproblem(backwardProblem);
+    }
 
+    if (neitherProblem.graph.V > TASK_CUTOFF) {
         #pragma omp task shared(neitherResult) firstprivate(neitherProblem)
         {
-            neitherResult =
-                solveSubproblem(neitherProblem);
+            neitherResult = solveSubproblem(neitherProblem);
         }
+    } else if (neitherProblem.graph.V > 0) {
+        neitherResult = solveSubproblem(neitherProblem);
     }
+}
+
 
     // The taskgroup guarantees all tasks have completed.
     // Merge the results.
