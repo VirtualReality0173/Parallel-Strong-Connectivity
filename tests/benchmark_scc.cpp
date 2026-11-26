@@ -69,27 +69,63 @@ Graph generateRandomGraph(int n) {
     return graph;
 }
 
-// Measure average execution time.
-template <typename Function>
-double measureAverage(Function function, int repetitions) {
-    double total = 0.0;
 
-    for (int i = 0; i < repetitions; i++) {
-        auto start = steady_clock::now();
+// Generate a directed chain of strongly connected blocks.
+Graph generateSCCDAG(int blockCount, int blockSize) {
 
-        function();
+    Graph graph(blockCount * blockSize);
 
-        auto end = steady_clock::now();
+    for (int b = 0; b < blockCount; ++b) {
 
-        total += duration<double, micro>(end - start).count();;
+        int base = b * blockSize;
+
+        for (int i = 0; i < blockSize; ++i) {
+
+            int u = base + i;
+
+            // Internal directed cycle makes each block an SCC.
+            int next = base + (i + 1) % blockSize;
+
+            graph.addEdge(u, next);
+
+            // One-way edges to the next block.
+            if (b + 1 < blockCount) {
+
+                int nextBlockVertex =
+                    (b + 1) * blockSize + i;
+
+                graph.addEdge(u, nextBlockVertex);
+            }
+        }
     }
 
-    return total / repetitions;
+    return graph;
 }
+
+// Measure average execution time.
+// Measure average execution time over a batch of repetitions.
+template <typename Function>
+double measureAverage(Function function, int repetitions) {
+
+    // Warm-up run (excluded from measurement).
+    function();
+
+    auto start = steady_clock::now();
+
+    for (int i = 0; i < repetitions; i++) {
+        function();
+    }
+
+    auto end = steady_clock::now();
+
+    return duration<double, micro>(end - start).count()
+           / repetitions;
+}
+
 
 void benchmarkGraph(const string& name, const Graph& graph) {
 
-    const int REPETITIONS = 3;
+    const int REPETITIONS = 50;
 
     TarjanSCC tarjan(graph);
     ParallelSCC parallel(graph);
@@ -99,7 +135,63 @@ void benchmarkGraph(const string& name, const Graph& graph) {
     Components parallelResult = normalize(parallel.run());
 
     if (sequentialResult != parallelResult) {
+
         cout << "\n" << name << ": CORRECTNESS FAILED\n";
+
+        cout << "Tarjan SCC count: "
+             << sequentialResult.size() << "\n";
+
+        cout << "Parallel SCC count: "
+             << parallelResult.size() << "\n";
+
+        // Find the first Tarjan component missing from Parallel SCC.
+        for (const auto& component : sequentialResult) {
+
+            if (find(
+                    parallelResult.begin(),
+                    parallelResult.end(),
+                    component
+                ) == parallelResult.end()) {
+
+                cout << "\nFirst missing component:\n";
+                cout << "Size: " << component.size() << "\n";
+                cout << "Vertices: ";
+
+                for (int i = 0;
+                     i < min(15, static_cast<int>(component.size()));
+                     ++i) {
+                    cout << component[i] << " ";
+                }
+
+                cout << "\n";
+                break;
+            }
+        }
+
+        // Find the first unexpected Parallel SCC component.
+        for (const auto& component : parallelResult) {
+
+            if (find(
+                    sequentialResult.begin(),
+                    sequentialResult.end(),
+                    component
+                ) == sequentialResult.end()) {
+
+                cout << "\nFirst unexpected component:\n";
+                cout << "Size: " << component.size() << "\n";
+                cout << "Vertices: ";
+
+                for (int i = 0;
+                     i < min(15, static_cast<int>(component.size()));
+                     ++i) {
+                    cout << component[i] << " ";
+                }
+
+                cout << "\n";
+                break;
+            }
+        }
+
         return;
     }
 
@@ -112,8 +204,31 @@ void benchmarkGraph(const string& name, const Graph& graph) {
         REPETITIONS
     );
 
-    // Measure parallel SCC.
-    double parallelTime = measureAverage(
+    // Test Parallel SCC with different thread counts.
+    const int threadCounts[] = {1, 2, 4, 8, 16, 20};
+
+    vector<pair<int, double>> parallelTimes;
+
+#ifdef _OPENMP
+
+    for (int threads : threadCounts) {
+
+        omp_set_num_threads(threads);
+
+        double executionTime = measureAverage(
+            [&]() {
+                ParallelSCC algorithm(graph);
+                algorithm.run();
+            },
+            REPETITIONS
+        );
+
+        parallelTimes.push_back({threads, executionTime});
+    }
+
+#else
+
+    double executionTime = measureAverage(
         [&]() {
             ParallelSCC algorithm(graph);
             algorithm.run();
@@ -121,28 +236,49 @@ void benchmarkGraph(const string& name, const Graph& graph) {
         REPETITIONS
     );
 
-    double speedup = sequentialTime / parallelTime;
+    parallelTimes.push_back({1, executionTime});
+
+#endif
+
+    // One-thread Parallel SCC time is our scalability baseline.
+    double oneThreadTime = parallelTimes.front().second;
+
+    cout << fixed << setprecision(3);
 
     cout << "\nGraph: " << name << "\n";
     cout << "Vertices: " << graph.V << "\n";
 
-    cout << fixed << setprecision(3);
-
     cout << "Tarjan time: "
-     << sequentialTime << " microseconds\n";
+         << sequentialTime << " microseconds\n";
 
-    cout << "Parallel SCC time: "
-     << parallelTime << " microseconds\n";
+    cout << "\nParallel SCC scaling:\n";
 
-    cout << "Speedup: "
-     << speedup << "x\n";
+    for (const auto& entry : parallelTimes) {
 
-    cout << "Correctness: PASSED\n";
+        int threads = entry.first;
+        double time = entry.second;
+
+        cout << threads << " threads: "
+             << time << " microseconds"
+             << " | Parallel speedup: "
+             << oneThreadTime / time
+             << "x"
+             << " | Speedup over Tarjan: "
+             << sequentialTime / time
+             << "x\n";
+    }
+
+    cout << "\nCorrectness: PASSED\n";
 }
+
 
 int main() {
 
-    const int V = 1000;
+    #ifdef _OPENMP
+    omp_set_dynamic(0);
+#endif
+
+    const int V = 20000;
 
 #ifdef _OPENMP
     cout << "OpenMP threads: " << omp_get_max_threads() << "\n";

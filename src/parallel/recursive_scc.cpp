@@ -2,76 +2,85 @@
 #include "scc/parallel_scc.hpp"
 #include "scc/pivot_scc.hpp"
 #include "scc/tarjan.hpp"
+
 #include <vector>
 #include <cstdlib>
+#include <utility>
+#include <iterator>
+#include <cstddef>
 
 #ifdef _OPENMP
 #include <omp.h>
 #endif
 
-// A recursive subproblem contains an induced graph
-// and a mapping from local IDs to original graph IDs.
+// Tuning parameters.
+static const int SEQUENTIAL_CUTOFF = 256;
+static const int TASK_CUTOFF = 256;
+
+
+// A recursive subproblem stores its induced graph and the mapping
+// from local vertex IDs to original graph vertex IDs.
 struct Subproblem {
     Graph graph;
     std::vector<int> originalVertices;
 
-    Subproblem(
-        const Graph& g,
-        const std::vector<int>& mapping
-    ) : graph(g), originalVertices(mapping) {}
+    // Taking Graph by value allows child graphs to be moved into place.
+    Subproblem(Graph g, std::vector<int> mapping)
+        : graph(std::move(g)),
+          originalVertices(std::move(mapping)) {}
 };
 
 
-// Construct an induced subgraph using local vertex IDs.
+// Construct one child graph.
+//
+// mapping[v] gives the child's local ID for parent vertex v.
+// label[v] identifies which child contains parent vertex v.
 static Subproblem makeSubproblem(
     const Subproblem& parent,
-    const std::vector<int>& vertices
+    const std::vector<int>& vertices,
+    const std::vector<int>& mapping,
+    const std::vector<int>& label,
+    int childLabel
 ) {
     int n = static_cast<int>(vertices.size());
 
     Graph childGraph(n);
-
-    // Map parent-local IDs to child-local IDs.
-    std::vector<int> mapping(parent.graph.V, -1);
-
-    for (int i = 0; i < n; i++) {
-        mapping[vertices[i]] = i;
-    }
-
-    // Copy only edges whose endpoints belong to this subset.
-    for (int i = 0; i < n; i++) {
-        int oldVertex = vertices[i];
-
-        for (int neighbor : parent.graph.adj[oldVertex]) {
-            if (mapping[neighbor] != -1) {
-                childGraph.addEdge(
-                    i,
-                    mapping[neighbor]
-                );
-            }
-        }
-    }
-
-    // Preserve original vertex IDs.
     std::vector<int> original(n);
 
-    for (int i = 0; i < n; i++) {
+    // Preserve original vertex IDs.
+    for (int i = 0; i < n; ++i) {
         original[i] =
             parent.originalVertices[vertices[i]];
     }
 
-    return Subproblem(childGraph, original);
+    // Copy only edges whose endpoints belong to this child.
+    for (int i = 0; i < n; ++i) {
+        int u = vertices[i];
+
+        for (int v : parent.graph.adj[u]) {
+            if (label[v] == childLabel) {
+                childGraph.addEdge(i, mapping[v]);
+            }
+        }
+    }
+
+    return Subproblem(
+        std::move(childGraph),
+        std::move(original)
+    );
 }
 
 
+// Choose a pivot with high total degree.
+// Ties are broken using distance from the local vertex-ID midpoint.
 static int choosePivot(const Graph& graph) {
     int bestVertex = 0;
     std::size_t bestDegree = 0;
-    int bestDistance = graph.V;
 
     int center = graph.V / 2;
+    int bestDistance = graph.V;
 
-    for (int v = 0; v < graph.V; v++) {
+    for (int v = 0; v < graph.V; ++v) {
         std::size_t degree =
             graph.adj[v].size() + graph.rev_adj[v].size();
 
@@ -98,45 +107,48 @@ static std::vector<std::vector<int>> solveSubproblem(
 
     int n = problem.graph.V;
 
-    // Base case: empty graph.
+    // Empty graph.
     if (n == 0) {
         return result;
     }
 
-    // Base case: one vertex.
+    // Single vertex.
     if (n == 1) {
         result.push_back(problem.originalVertices);
         return result;
     }
 
-    // Sequential cutoff for small subproblems.
-    const int SEQUENTIAL_CUTOFF = 32;
+    // Use Tarjan when the subproblem is sufficiently small.
     if (n <= SEQUENTIAL_CUTOFF) {
-    TarjanSCC tarjan(problem.graph);
-    auto localComponents = tarjan.run();
-    // Convert local vertex IDs to original vertex IDs.
-    for (const auto& component : localComponents) {
-        std::vector<int> originalComponent;
-        for (int v : component) {
-            originalComponent.push_back(
-                problem.originalVertices[v]
-            );
+        TarjanSCC tarjan(problem.graph);
+
+        auto localComponents = tarjan.run();
+
+        for (const auto& component : localComponents) {
+            std::vector<int> originalComponent;
+            originalComponent.reserve(component.size());
+
+            for (int v : component) {
+                originalComponent.push_back(
+                    problem.originalVertices[v]
+                );
+            }
+
+            result.push_back(std::move(originalComponent));
         }
 
-        result.push_back(originalComponent);
+        return result;
     }
 
-    return result;
-}
-
-    // Select the first local vertex as pivot.
+    // Select pivot and calculate its SCC partition.
     int pivot = choosePivot(problem.graph);
 
     PivotPartition partition =
         pivotSCC(problem.graph, pivot);
 
-    // Add the pivot SCC, converting IDs back to original IDs.
+    // Add the pivot SCC, translating IDs back to original IDs.
     std::vector<int> pivotComponent;
+    pivotComponent.reserve(partition.scc.size());
 
     for (int v : partition.scc) {
         pivotComponent.push_back(
@@ -144,74 +156,152 @@ static std::vector<std::vector<int>> solveSubproblem(
         );
     }
 
-    result.push_back(pivotComponent);
+    result.push_back(std::move(pivotComponent));
 
-    // Construct the three independent recursive subproblems.
-    Subproblem forwardProblem =
-        makeSubproblem(problem, partition.forwardOnly);
+    // Create one shared mapping and label array for all three children.
+    std::vector<int> mapping(n, -1);
+    std::vector<int> label(n, -1);
 
-    Subproblem backwardProblem =
-        makeSubproblem(problem, partition.backwardOnly);
+    // Child 0: forward-only vertices.
+    for (int i = 0; i < static_cast<int>(
+             partition.forwardOnly.size()); ++i) {
+        int v = partition.forwardOnly[i];
+        mapping[v] = i;
+        label[v] = 0;
+    }
 
-    Subproblem neitherProblem =
-        makeSubproblem(problem, partition.neither);
+    // Child 1: backward-only vertices.
+    for (int i = 0; i < static_cast<int>(
+             partition.backwardOnly.size()); ++i) {
+        int v = partition.backwardOnly[i];
+        mapping[v] = i;
+        label[v] = 1;
+    }
 
-    // Each task writes to its own result vector.
+    // Child 2: neither forward-only nor backward-only.
+    for (int i = 0; i < static_cast<int>(
+             partition.neither.size()); ++i) {
+        int v = partition.neither[i];
+        mapping[v] = i;
+        label[v] = 2;
+    }
+
+    // Each child writes to its own result vector.
     std::vector<std::vector<int>> forwardResult;
     std::vector<std::vector<int>> backwardResult;
     std::vector<std::vector<int>> neitherResult;
 
+    // Wait for all three child computations before merging results.
+    #pragma omp taskgroup
+    {
+        // Forward-only subproblem.
+        if (!partition.forwardOnly.empty()) {
+            if (static_cast<int>(partition.forwardOnly.size())
+                    > TASK_CUTOFF) {
 
-#pragma omp taskgroup
-{
-    if (forwardProblem.graph.V > TASK_CUTOFF) {
-        #pragma omp task shared(forwardResult) firstprivate(forwardProblem)
-        {
-            forwardResult = solveSubproblem(forwardProblem);
+                #pragma omp task shared(forwardResult, problem, partition, mapping, label)
+                {
+                    Subproblem child = makeSubproblem(
+                        problem,
+                        partition.forwardOnly,
+                        mapping,
+                        label,
+                        0
+                    );
+
+                    forwardResult = solveSubproblem(child);
+                }
+            } else {
+                Subproblem child = makeSubproblem(
+                    problem,
+                    partition.forwardOnly,
+                    mapping,
+                    label,
+                    0
+                );
+
+                forwardResult = solveSubproblem(child);
+            }
         }
-    } else if (forwardProblem.graph.V > 0) {
-        forwardResult = solveSubproblem(forwardProblem);
+
+        // Backward-only subproblem.
+        if (!partition.backwardOnly.empty()) {
+            if (static_cast<int>(partition.backwardOnly.size())
+                    > TASK_CUTOFF) {
+
+                #pragma omp task shared(backwardResult, problem, partition, mapping, label)
+                {
+                    Subproblem child = makeSubproblem(
+                        problem,
+                        partition.backwardOnly,
+                        mapping,
+                        label,
+                        1
+                    );
+
+                    backwardResult = solveSubproblem(child);
+                }
+            } else {
+                Subproblem child = makeSubproblem(
+                    problem,
+                    partition.backwardOnly,
+                    mapping,
+                    label,
+                    1
+                );
+
+                backwardResult = solveSubproblem(child);
+            }
+        }
+
+        // Neither subproblem.
+        if (!partition.neither.empty()) {
+            if (static_cast<int>(partition.neither.size())
+                    > TASK_CUTOFF) {
+
+                #pragma omp task shared(neitherResult, problem, partition, mapping, label)
+                {
+                    Subproblem child = makeSubproblem(
+                        problem,
+                        partition.neither,
+                        mapping,
+                        label,
+                        2
+                    );
+
+                    neitherResult = solveSubproblem(child);
+                }
+            } else {
+                Subproblem child = makeSubproblem(
+                    problem,
+                    partition.neither,
+                    mapping,
+                    label,
+                    2
+                );
+
+                neitherResult = solveSubproblem(child);
+            }
+        }
     }
 
-    if (backwardProblem.graph.V > TASK_CUTOFF) {
-        #pragma omp task shared(backwardResult) firstprivate(backwardProblem)
-        {
-            backwardResult = solveSubproblem(backwardProblem);
-        }
-    } else if (backwardProblem.graph.V > 0) {
-        backwardResult = solveSubproblem(backwardProblem);
-    }
-
-    if (neitherProblem.graph.V > TASK_CUTOFF) {
-        #pragma omp task shared(neitherResult) firstprivate(neitherProblem)
-        {
-            neitherResult = solveSubproblem(neitherProblem);
-        }
-    } else if (neitherProblem.graph.V > 0) {
-        neitherResult = solveSubproblem(neitherProblem);
-    }
-}
-
-
-    // The taskgroup guarantees all tasks have completed.
-    // Merge the results.
-
+    // The taskgroup guarantees that all child results are ready.
     result.insert(
         result.end(),
-        forwardResult.begin(),
-        forwardResult.end()
+        std::make_move_iterator(forwardResult.begin()),
+        std::make_move_iterator(forwardResult.end())
     );
 
     result.insert(
         result.end(),
-        backwardResult.begin(),
-        backwardResult.end()
+        std::make_move_iterator(backwardResult.begin()),
+        std::make_move_iterator(backwardResult.end())
     );
 
     result.insert(
         result.end(),
-        neitherResult.begin(),
-        neitherResult.end()
+        std::make_move_iterator(neitherResult.begin()),
+        std::make_move_iterator(neitherResult.end())
     );
 
     return result;
@@ -225,14 +315,14 @@ ParallelSCC::ParallelSCC(const Graph& g)
 
 std::vector<std::vector<int>> ParallelSCC::run() {
 
-    // Initially, every original vertex belongs to the problem.
+    // Initially, every vertex belongs to the original graph.
     std::vector<int> vertices(graph.V);
 
-    for (int i = 0; i < graph.V; i++) {
+    for (int i = 0; i < graph.V; ++i) {
         vertices[i] = i;
     }
 
-    Subproblem initial(graph, vertices);
+    Subproblem initial(graph, std::move(vertices));
 
     std::vector<std::vector<int>> result;
 

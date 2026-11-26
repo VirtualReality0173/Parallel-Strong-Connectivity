@@ -3,6 +3,7 @@
 #include "scc/reachability.hpp"
 
 #include <stdexcept>
+#include <vector>
 
 PivotPartition pivotSCC(
     const Graph& graph,
@@ -12,26 +13,39 @@ PivotPartition pivotSCC(
         throw std::out_of_range("Invalid pivot vertex");
     }
 
-    // Vertices reachable FROM the pivot.
+    // Get vertices reachable FROM the pivot.
     std::vector<int> forward =
         parallelBFS(graph, pivot, false);
 
-    // Vertices that can reach the pivot.
+    // Get vertices that can reach the pivot.
     std::vector<int> backward =
         parallelBFS(graph, pivot, true);
 
+    // Convert the returned vertex lists into membership arrays.
+    std::vector<bool> forwardSeen(graph.V, false);
+    std::vector<bool> backwardSeen(graph.V, false);
+
+    for (int v : forward) {
+        forwardSeen[v] = true;
+    }
+
+    for (int v : backward) {
+        backwardSeen[v] = true;
+    }
+
     PivotPartition result;
 
-    // Partition every vertex into exactly one of four sets.
-    for (int v = 0; v < graph.V; v++) {
+    // Classify every vertex into exactly one of four sets.
+    for (int v = 0; v < graph.V; ++v) {
 
-        if (forward[v] && backward[v]) {
+        if (forwardSeen[v] && backwardSeen[v]) {
+            // Reachable from pivot AND can reach pivot.
             result.scc.push_back(v);
         }
-        else if (forward[v]) {
+        else if (forwardSeen[v]) {
             result.forwardOnly.push_back(v);
         }
-        else if (backward[v]) {
+        else if (backwardSeen[v]) {
             result.backwardOnly.push_back(v);
         }
         else {

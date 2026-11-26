@@ -1,7 +1,8 @@
 
 #include "scc/reachability.hpp"
 
-#include <stdexcept>
+#include <vector>
+#include <algorithm>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -12,35 +13,44 @@ std::vector<int> parallelBFS(
     int source,
     bool reverse
 ) {
+    std::vector<int> reached;
+
     if (source < 0 || source >= graph.V) {
-        throw std::out_of_range("Invalid BFS source");
+        return reached;
     }
 
-    const auto& adj = reverse ? graph.rev_adj : graph.adj;
+    const std::vector<std::vector<int>>& adjacency =
+        reverse ? graph.rev_adj : graph.adj;
 
     std::vector<int> visited(graph.V, 0);
+
     std::vector<int> frontier;
-
     frontier.push_back(source);
+
     visited[source] = 1;
+    reached.push_back(source);
 
-    const std::size_t PARALLEL_FRONTIER_THRESHOLD = 64;
-
-    int maxThreads = 1;
+    int threadCount = 1;
 
 #ifdef _OPENMP
-    maxThreads = omp_get_max_threads();
+    if (omp_in_parallel()) {
+        threadCount = omp_get_num_threads();
+    }
 #endif
 
     while (!frontier.empty()) {
 
-        // Small frontier: avoid OpenMP overhead.
-        if (frontier.size() < PARALLEL_FRONTIER_THRESHOLD) {
+        std::vector<int> nextFrontier;
 
-            std::vector<int> nextFrontier;
+        bool useParallel =
+            threadCount > 1 && frontier.size() >= 128;
 
+        if (!useParallel) {
+
+            // Sequential frontier processing.
             for (int u : frontier) {
-                for (int v : adj[u]) {
+                for (int v : adjacency[u]) {
+
                     if (!visited[v]) {
                         visited[v] = 1;
                         nextFrontier.push_back(v);
@@ -48,57 +58,82 @@ std::vector<int> parallelBFS(
                 }
             }
 
-            frontier.swap(nextFrontier);
         }
 
-        // Large frontier: use parallel traversal.
+#ifdef _OPENMP
         else {
 
-            std::vector<std::vector<int>> localNext(maxThreads);
+            // Create bounded-sized tasks for the current frontier.
+            const int CHUNK_SIZE = 64;
 
-            #pragma omp parallel
+            int numTasks = std::min(
+                static_cast<int>(
+                    (frontier.size() + CHUNK_SIZE - 1)
+                    / CHUNK_SIZE
+                ),
+                threadCount * 4
+            );
+
+            std::vector<std::vector<int>> localNext(numTasks);
+
+            #pragma omp taskgroup
             {
-                int tid = 0;
+                for (int t = 0; t < numTasks; ++t) {
 
-#ifdef _OPENMP
-                tid = omp_get_thread_num();
-#endif
+                    int begin = static_cast<int>(
+                        frontier.size() * t / numTasks
+                    );
 
-                #pragma omp for schedule(dynamic, 1)
-                for (long long i = 0;
-                     i < static_cast<long long>(frontier.size());
-                     i++) {
+                    int end = static_cast<int>(
+                        frontier.size() * (t + 1) / numTasks
+                    );
 
-                    int u = frontier[i];
+                    #pragma omp task firstprivate(t, begin, end) \
+                        shared(frontier, adjacency, visited, localNext)
+                    {
+                        for (int i = begin; i < end; ++i) {
 
-                    for (int v : adj[u]) {
+                            int u = frontier[i];
 
-                        int wasVisited;
+                            for (int v : adjacency[u]) {
 
-                        #pragma omp atomic capture
-                        {
-                            wasVisited = visited[v];
-                            visited[v] = 1;
-                        }
+                                int oldValue;
 
-                        if (wasVisited == 0) {
-                            localNext[tid].push_back(v);
+                                #pragma omp atomic capture
+                                {
+                                    oldValue = visited[v];
+                                    visited[v] = 1;
+                                }
+
+                                if (oldValue == 0) {
+                                    localNext[t].push_back(v);
+                                }
+                            }
                         }
                     }
                 }
             }
 
-            frontier.clear();
+            // Merge the thread/task-local frontiers.
+            for (int t = 0; t < numTasks; ++t) {
 
-            for (const auto& local : localNext) {
-                frontier.insert(
-                    frontier.end(),
-                    local.begin(),
-                    local.end()
+                nextFrontier.insert(
+                    nextFrontier.end(),
+                    localNext[t].begin(),
+                    localNext[t].end()
                 );
             }
         }
+#endif
+
+        reached.insert(
+            reached.end(),
+            nextFrontier.begin(),
+            nextFrontier.end()
+        );
+
+        frontier.swap(nextFrontier);
     }
 
-    return visited;
+    return reached;
 }
