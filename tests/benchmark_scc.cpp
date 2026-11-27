@@ -295,6 +295,8 @@ int main() {
     benchmarkGraph("Directed Chain", chain);
     benchmarkGraph("Single Large SCC (Cycle)", cycle);
     benchmarkGraph("Sparse Random Graph", randomGraph);
+    Graph sccDAG = generateSCCDAG(32, 2048);
+    benchmarkGraph("DAG of 32 large SCCs", sccDAG);
 
     return 0;
 }
